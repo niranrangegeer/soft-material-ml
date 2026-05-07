@@ -1,0 +1,29 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
+*.log
+.env
+.venv/
+venv/
+
+# Images and data
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.tiff
+*.pdf
+
+# Data/model directories
+Train_images/
+Test_images/
+Paper/
+full_train_with_energy_field/
+generator1/
