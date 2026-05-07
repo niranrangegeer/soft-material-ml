@@ -15,41 +15,30 @@ import numpy as np
 print(f"Python: {sys.version.split()[0]}")
 print(f"TensorFlow: {tf.__version__}")
 
-# 0.1 混合精度 (FP16) — 减半显存占用，4GB显卡必备
-from tensorflow.keras.mixed_precision import set_global_policy, Policy
-try:
-    set_global_policy('mixed_float16')
-    print("混合精度(FP16): 已启用 (显存占用减半)")
-except Exception as e:
-    print(f"混合精度启用失败: {e}，使用默认 FP32")
-
-# 0.2 GPU 配置
+# 0.1 GPU 检测
 gpus = tf.config.list_physical_devices('GPU')
-if gpus:
-    try:
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-        info = tf.config.experimental.get_device_details(gpus[0])
-        vram_bytes = info.get('device_memory_size', 0)
-        vram_gb = vram_bytes / (1024**3) if vram_bytes else 0
-        print(f"GPU: {info.get('device_name', 'Unknown')} | 显存: {vram_gb:.1f} GB")
-        if vram_gb > 0 and vram_gb < 6:
-            print("⚠️  显存 < 6GB，已自动使用 BATCH_SIZE=1 + FP16 混合精度")
-    except Exception as e:
-        print(f"GPU 配置警告: {e}")
-else:
-    print("未检测到 GPU，将使用 CPU (1001 epoch 约需 10-20 天)")
-    print("建议: 在 WSL2 中运行以启用 GPU 加速")
+USE_GPU = len(gpus) > 0
 
-# 0.3 检查 RAM
-try:
-    import psutil
-    ram_gb = psutil.virtual_memory().total / (1024**3)
-    print(f"系统 RAM: {ram_gb:.0f} GB")
-    if ram_gb < 16:
-        print("⚠️  RAM < 16GB，训练中请关闭其他大型程序")
-except ImportError:
-    pass
+# 0.2 混合精度 — 仅 GPU 时启用 (CPU 无 AVX-512 反而更慢)
+USE_FP16 = False
+if USE_GPU:
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
+    info = tf.config.experimental.get_device_details(gpus[0])
+    vram_bytes = info.get('device_memory_size', 0)
+    vram_gb = vram_bytes / (1024**3) if vram_bytes else 0
+    print(f"GPU: {info.get('device_name', 'Unknown')} | 显存: {vram_gb:.1f} GB")
+    if vram_gb > 0 and vram_gb < 6:
+        from tensorflow.keras.mixed_precision import set_global_policy
+        try:
+            set_global_policy('mixed_float16')
+            USE_FP16 = True
+            print("混合精度(FP16): 已启用 (显存 < 6GB，自动减半)")
+        except Exception as e:
+            print(f"混合精度启用失败: {e}")
+else:
+    print("未检测到 GPU，使用 CPU + FP32 (1001 epoch 约需 10-20 天)")
+    print("建议: 在 WSL2 中运行以启用 GPU 加速")
 
 # ============================================================
 # 1. 路径 (适配 Windows 实际目录结构)
