@@ -412,7 +412,9 @@ def generate_images(model, test_input, test_energy, tar, epoch, kj):
     plt.savefig(out_path, transparent=True)
     plt.close('all')
 
-def train_step(input_image, energy_image, target, epoch, n):
+@tf.function(jit_compile=False)
+def _train_step_tf(input_image, energy_image, target):
+    """纯 TensorFlow 图计算，无 Python 副作用，供 @tf.function 编译"""
     with tf.GradientTape() as gen_tape, tf.GradientTape() as disc_tape:
         gen_output = generator([input_image, energy_image], training=True)
         disc_real_output = discriminator([input_image, energy_image, target], training=True)
@@ -422,17 +424,23 @@ def train_step(input_image, energy_image, target, epoch, n):
             disc_fake_output, gen_output, target)
         disc_loss, disc_real_loss = discriminator_loss(disc_real_output, disc_fake_output)
 
-        # 每个 epoch 结束时记录一次 loss
-        total_steps = len(train_files) // BATCH_SIZE - 1
-        if n == total_steps:
-            with open(loss_file_path, 'a') as f:
-                f.write(f"{epoch} {int(n)} {gen_l1_loss:.6f} {gen_l1_loss:.6f} "
-                        f"{gen_gan_loss:.6f} {disc_loss:.6f} {disc_real_loss:.6f}\n")
-
     gen_grads = gen_tape.gradient(gen_total_loss, generator.trainable_variables)
     disc_grads = disc_tape.gradient(disc_loss, discriminator.trainable_variables)
     generator_optimizer.apply_gradients(zip(gen_grads, generator.trainable_variables))
     discriminator_optimizer.apply_gradients(zip(disc_grads, discriminator.trainable_variables))
+    return gen_total_loss, gen_l1_loss, gen_gan_loss, disc_loss, disc_real_loss
+
+def train_step_and_log(input_image, energy_image, target, epoch, n):
+    """包装器：调用编译后的 TF 图 + 处理 Python 日志"""
+    gen_total_loss, gen_l1_loss, gen_gan_loss, disc_loss, disc_real_loss = \
+        _train_step_tf(input_image, energy_image, target)
+
+    total_steps = len(train_files) // BATCH_SIZE - 1
+    if n == total_steps:
+        with open(loss_file_path, 'a') as f:
+            f.write(f"{epoch} {int(n)} {float(gen_l1_loss):.6f} {float(gen_l1_loss):.6f} "
+                    f"{float(gen_gan_loss):.6f} {float(disc_loss):.6f} {float(disc_real_loss):.6f}\n")
+
     return float(gen_total_loss), float(disc_loss)
 
 def fit(train_ds, epochs, test_ds, start_epoch):
@@ -453,7 +461,7 @@ def fit(train_ds, epochs, test_ds, start_epoch):
             print('.', end='', flush=True)
             if (n + 1) % 400 == 0:
                 print(f"[{n+1}]", end='', flush=True)
-            gl, dl = train_step(inp_img, eng_img, tar_img, epoch, n)
+            gl, dl = train_step_and_log(inp_img, eng_img, tar_img, epoch, n)
             gen_losses.append(gl)
             disc_losses.append(dl)
 
