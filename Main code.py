@@ -405,8 +405,13 @@ except Exception as e:
 def generate_images(model, test_input, test_energy, tar, epoch, kj):
     prediction = model([test_input, test_energy], training=True)
     plt.figure(figsize=(20, 5))
-    display_list = [test_input[0], test_energy[0], tar[0], prediction[0]]
-    title = ['几何(输入)', '能量场(输入)', '裂纹(标准答案)', '裂纹(预测)']
+    # 转换为 float32 (避免 FP16 与 matplotlib 冲突)
+    disp_input = tf.cast(test_input[0], tf.float32)
+    disp_energy = tf.cast(test_energy[0], tf.float32)
+    disp_tar = tf.cast(tar[0], tf.float32)
+    disp_pred = tf.cast(prediction[0], tf.float32)
+    display_list = [disp_input, disp_energy, disp_tar, disp_pred]
+    title = ['Geometry', 'Energy Field', 'Crack (Ground Truth)', 'Crack (Predicted)']
     for i in range(4):
         plt.subplot(1, 4, i + 1)
         plt.title(title[i])
