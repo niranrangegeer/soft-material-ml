@@ -312,7 +312,8 @@ def Generator():
     xd1 = conv(288)(xd1)
 
     last = tf.keras.layers.Conv2DTranspose(OUTPUT_CHANNELS, 4, strides=1,
-           padding='same', kernel_initializer=init, activation='tanh')
+           padding='same', kernel_initializer=init, activation='tanh',
+           dtype='float32')  # FP16 模式下最后层必须 float32
     x = last(xd1)
     return tf.keras.Model(inputs=[inp, energy_inp], outputs=x)
 
@@ -339,7 +340,8 @@ def Discriminator():
     bn = tf.keras.layers.BatchNormalization()(cv)
     lr = tf.keras.layers.LeakyReLU()(bn)
     zp2 = tf.keras.layers.ZeroPadding2D()(lr)
-    last = tf.keras.layers.Conv2D(1, 4, strides=1, kernel_initializer=init)(zp2)
+    last = tf.keras.layers.Conv2D(1, 4, strides=1, kernel_initializer=init,
+           dtype='float32')(zp2)
 
     return tf.keras.Model(inputs=[inp, energy, tar], outputs=last)
 
