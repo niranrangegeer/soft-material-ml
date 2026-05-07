@@ -1,32 +1,55 @@
 """
 U-Net 3+ cGAN — 裂纹路径预测 (Gen 2: 几何+能量场 → 裂纹)
-适用: Windows 11, RTX 3050 4GB, TensorFlow 2.x
+适用: WSL2 / Windows 11, RTX 3050 4GB, 16GB RAM, TensorFlow 2.x
 """
 import os
 import sys
+import time
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import numpy as np
 
 # ============================================================
-# 0. 环境检查
+# 0. 环境检查与配置
 # ============================================================
 print(f"Python: {sys.version.split()[0]}")
 print(f"TensorFlow: {tf.__version__}")
 
-# GPU 配置 (TF2 方式)
+# 0.1 混合精度 (FP16) — 减半显存占用，4GB显卡必备
+from tensorflow.keras.mixed_precision import set_global_policy, Policy
+try:
+    set_global_policy('mixed_float16')
+    print("混合精度(FP16): 已启用 (显存占用减半)")
+except Exception as e:
+    print(f"混合精度启用失败: {e}，使用默认 FP32")
+
+# 0.2 GPU 配置
 gpus = tf.config.list_physical_devices('GPU')
 if gpus:
     try:
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
         info = tf.config.experimental.get_device_details(gpus[0])
-        vram_mb = info.get('device_memory_size', 'N/A')
-        print(f"GPU: {info.get('device_name', 'Unknown')} | 显存: {vram_mb}")
+        vram_bytes = info.get('device_memory_size', 0)
+        vram_gb = vram_bytes / (1024**3) if vram_bytes else 0
+        print(f"GPU: {info.get('device_name', 'Unknown')} | 显存: {vram_gb:.1f} GB")
+        if vram_gb > 0 and vram_gb < 6:
+            print("⚠️  显存 < 6GB，已自动使用 BATCH_SIZE=1 + FP16 混合精度")
     except Exception as e:
         print(f"GPU 配置警告: {e}")
 else:
-    print("未检测到 GPU，将使用 CPU (速度会慢很多)")
+    print("未检测到 GPU，将使用 CPU (1001 epoch 约需 10-20 天)")
+    print("建议: 在 WSL2 中运行以启用 GPU 加速")
+
+# 0.3 检查 RAM
+try:
+    import psutil
+    ram_gb = psutil.virtual_memory().total / (1024**3)
+    print(f"系统 RAM: {ram_gb:.0f} GB")
+    if ram_gb < 16:
+        print("⚠️  RAM < 16GB，训练中请关闭其他大型程序")
+except ImportError:
+    pass
 
 # ============================================================
 # 1. 路径 (适配 Windows 实际目录结构)
@@ -345,11 +368,16 @@ generator_optimizer = tf.keras.optimizers.Adam(1e-4, beta_1=0.5)
 discriminator_optimizer = tf.keras.optimizers.Adam(1e-5, beta_1=0.5)
 
 # ============================================================
-# 9. 检查点 (断点续训)
+# 9. 检查点 (每 80 epoch 保存一次)
 # ============================================================
+CHECKPOINT_INTERVAL = 80  # 每隔多少 epoch 保存一次
 gen_ckpt_path = os.path.join(SAVE_DIR, 'generator_checkpoint.weights.h5')
 disc_ckpt_path = os.path.join(SAVE_DIR, 'discriminator_checkpoint.weights.h5')
+gen_best_path = os.path.join(SAVE_DIR, 'generator_best.weights.h5')
+disc_best_path = os.path.join(SAVE_DIR, 'discriminator_best.weights.h5')
 loss_file_path = 'Loss.txt'
+
+best_l1_loss = float('inf')
 
 def get_start_epoch():
     if os.path.exists(loss_file_path):
@@ -398,7 +426,7 @@ def train_step(input_image, energy_image, target, epoch, n):
             disc_fake_output, gen_output, target)
         disc_loss, disc_real_loss = discriminator_loss(disc_real_output, disc_fake_output)
 
-        # 每个 epoch 记录一次 (1600张/BATCH_SIZE=1 → n=0 到 1599, 记录在第1599步)
+        # 每个 epoch 结束时记录一次 loss
         total_steps = len(train_files) // BATCH_SIZE - 1
         if n == total_steps:
             with open(loss_file_path, 'a') as f:
@@ -409,35 +437,64 @@ def train_step(input_image, energy_image, target, epoch, n):
     disc_grads = disc_tape.gradient(disc_loss, discriminator.trainable_variables)
     generator_optimizer.apply_gradients(zip(gen_grads, generator.trainable_variables))
     discriminator_optimizer.apply_gradients(zip(disc_grads, discriminator.trainable_variables))
+    return float(gen_total_loss), float(disc_loss)
 
 def fit(train_ds, epochs, test_ds, start_epoch):
+    global best_l1_loss
+    print(f"检查点间隔: 每 {CHECKPOINT_INTERVAL} epoch 保存一次")
+    print(f"磁盘预估: ~430MB × {epochs // CHECKPOINT_INTERVAL} 次 ≈ {(epochs // CHECKPOINT_INTERVAL) * 0.43:.0f} GB\n")
+
     for epoch in range(start_epoch, epochs):
+        t_start = time.time()
+
         # 每个 epoch 生成一张预览图
         for example_input, example_energy, example_target in test_ds.take(1):
             generate_images(generator, example_input, example_energy, example_target, epoch + 1, 1)
 
         print(f"Epoch {epoch}/{epochs} ", end='', flush=True)
+        gen_losses, disc_losses = [], []
         for n, (inp_img, eng_img, tar_img) in train_ds.enumerate():
             print('.', end='', flush=True)
-            if (n + 1) % 100 == 0:
+            if (n + 1) % 400 == 0:
                 print(f"[{n+1}]", end='', flush=True)
-            train_step(inp_img, eng_img, tar_img, epoch, n)
-        print(" done")
+            gl, dl = train_step(inp_img, eng_img, tar_img, epoch, n)
+            gen_losses.append(gl)
+            disc_losses.append(dl)
 
-        # 每个 epoch 保存检查点
-        generator.save_weights(gen_ckpt_path)
-        discriminator.save_weights(disc_ckpt_path)
-        print(f"  检查点已保存 → {SAVE_DIR}/")
+        elapsed = time.time() - t_start
+        avg_gen = sum(gen_losses) / len(gen_losses) if gen_losses else 0
+        avg_disc = sum(disc_losses) / len(disc_losses) if disc_losses else 0
+        remaining = (elapsed * (epochs - epoch - 1)) / 3600
+        print(f" {elapsed:.0f}s | G_loss:{avg_gen:.2f} D_loss:{avg_disc:.2f} | 预计剩余:{remaining:.1f}h")
+
+        # 每 CHECKPOINT_INTERVAL 个 epoch 保存一次
+        if (epoch + 1) % CHECKPOINT_INTERVAL == 0 or epoch == epochs - 1:
+            generator.save_weights(gen_ckpt_path)
+            discriminator.save_weights(disc_ckpt_path)
+            print(f"  ✓ 检查点已保存 (epoch {epoch}) → {SAVE_DIR}/")
+
+            # 如果 L1 loss 创新低，额外存一份 best
+            if avg_gen < best_l1_loss:
+                best_l1_loss = avg_gen
+                generator.save_weights(gen_best_path)
+                discriminator.save_weights(disc_best_path)
+                print(f"  ★ 最佳模型已更新 (L1={best_l1_loss:.4f})")
 
 # ============================================================
 # 11. 启动训练
 # ============================================================
 print(f"\n{'='*60}")
-print(f"BATCH_SIZE = {BATCH_SIZE} | 训练样本 = {len(train_files)} | 测试样本 = {len(test_files)}")
-print(f"输出目录 = {OUT_DIR}/ | 检查点 = {SAVE_DIR}/")
+print(f"  BATCH_SIZE = {BATCH_SIZE} (1张/步，适配4GB显存)")
+print(f"  混合精度  = FP16 (显存减半)")
+print(f"  训练样本  = {len(train_files)} 张")
+print(f"  测试样本  = {len(test_files)} 张")
+print(f"  检查点间隔 = 每 {CHECKPOINT_INTERVAL} epoch")
+print(f"  输出目录  = {OUT_DIR}/")
+print(f"  检查点目录 = {SAVE_DIR}/")
 print(f"{'='*60}\n")
 
 EPOCHS = 1001
 START_EPOCH = get_start_epoch()
-print(f"开始训练: epoch {START_EPOCH} → {EPOCHS}")
+print(f"开始训练: epoch {START_EPOCH} → {EPOCHS}\n")
 fit(train_dataset, EPOCHS, test_dataset, START_EPOCH)
+print("\n训练完成！最佳模型已保存至 SaveModel/generator_best.weights.h5")
